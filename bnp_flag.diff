@@ -1,0 +1,149 @@
+--- //src/Bgp/svipul.elgin.4/ptest/BgpEcmpInplaceAdjReplaceTest1.py	#1
++++ src/Bgp/ptest/BgpEcmpInplaceAdjReplaceTest1.py	2017-01-05 18:02:25.250443389 -0800
+@@ -7,10 +7,10 @@
+ import BgpEcmpTests
+ 
+ tests = [
+-   BgpEcmpTests.inplaceAdjReplaceLinkDownTest,
++   #BgpEcmpTests.inplaceAdjReplaceLinkDownTest,
+    BgpEcmpTests.inplaceAdjReplaceLinkDownByBfdTest,
+-   BgpEcmpTests.inplaceAdjReplaceEcmpToNonEcmpTest,
+-   BgpEcmpTests.inplaceAdjReplaceRoutesRejectedByPolicyTest,
++   #BgpEcmpTests.inplaceAdjReplaceEcmpToNonEcmpTest,
++   #BgpEcmpTests.inplaceAdjReplaceRoutesRejectedByPolicyTest,
+ ]
+ 
+ BgpTestLib.runProductTests( tests, v6=True, ip6EcmpSupported=True,
+--- //src/Bgp/svipul.elgin.4/test/BgpEcmpTests.py	#3
++++ src/Bgp/test/BgpEcmpTests.py	2017-01-05 18:09:03.391144126 -0800
+@@ -2637,6 +2637,7 @@
+                 description='verify adjacency after init' )
+    adjBefore = waitOnRibFibAdjMatch( rtrA, routeSet, ipv6 )
+ 
++   Tac.pdb()
+    t0( "Calling trigger for link down" )
+    trigger( topo, *args )
+ 
+--- //src/gated/svipul.elgin.4/gated-ctk/src/aspath/aspath_bgp.c	#5
++++ src/gated/gated-ctk/src/aspath/aspath_bgp.c	2017-01-05 16:35:00.615235471 -0800
+@@ -678,6 +678,7 @@
+  	bool blackhole_found = false;
+ 	rt_adjacency *adj;
+ 	int af = 0;
++	bgpPeer *bnp;
+ 
+ 	BGP_PROF("bgp_ecmp_compute_nexthops");
+ 	for (ribi = 0; ribi < NUMRIBS; ribi++) {
+@@ -798,6 +799,12 @@
+ 			if (!rt_sync_is_direct_interface(nhe, ribi)) {
+ 				continue;
+ 			}
++			bnp = BRT_NBR(rt);
++			if (bgpp_flag_test(bnp, BGPPF_LINK_DOWN_IAR)) {
++				CONVERGENCE_TRACE_V(2, "+++ bgp_ecmp_compute_nexthops skip rt from peer %A due to BGPPF_LINK_DOWN_IAR",
++						bnp->bgp_addr);
++				continue;
++			}
+                         if (BEH_HAS_MIXED_AF_NEXTHOPS(beh)) {
+                                 if (nhe->rtsnh_igp_nexthop[ribi]->rts_nh_n_gw > 0) {
+                                         af = socktype(nhe->rtsnh_igp_nexthop[ribi]->rts_nh_nexthop[0]);
+--- //src/gated/svipul.elgin.4/gated-ctk/src/bgp/bgp.h	#2
++++ src/gated/gated-ctk/src/bgp/bgp.h	2017-01-05 17:22:05.006821663 -0800
+@@ -193,6 +193,7 @@
+ 	 * reset the flags in bgp_write_ready().
+ 	 */
+ 	BGPPF_WRITE_IN_PROGRESS, /* Syncing to peer in progress */
++	BGPPF_LINK_DOWN_IAR, /* Peer is closing due to link down, bfd down etc */
+ 
+ 	/* LEAVE THIS AT THE END => */ BGPPF_COUNT
+ } BgpPeerFlag;
+@@ -1170,7 +1171,7 @@
+  * integers (32 + 32 + 3). The _BGPPF_COUNT macro is required for the other macros to
+  * work correctly.
+  */
+-#define _BGPPF_COUNT 2
++#define _BGPPF_COUNT 3
+ 
+ /*
+  * If the below statement is asserted, its because someone has added
+--- //src/gated/svipul.elgin.4/gated-ctk/src/bgp/bgp_dget_peer.c	#1
++++ src/gated/gated-ctk/src/bgp/bgp_dget_peer.c	2017-01-05 17:47:25.165989528 -0800
+@@ -368,10 +368,10 @@
+ };
+ 
+ /*
+- * If this assert triggers, you need to add SID_ and DABIT_ definitions of
+- * BGP_PEER_ENTRY_FLAGS3, and add the new item into this table.
++ * If this assert triggers, you need to add SID_BGP_PEER_ENTRY_BGP_FLAGS
++ * in mioagt/bgp_api.h
+  */
+-CASSERT(sizeof (bgp_flag_t) / sizeof (flag_t) == 2, bgp_need_flag_mdt_update)
++CASSERT(sizeof (bgp_flag_t) / sizeof (flag_t) == 3, bgp_need_flag_mdt_update)
+ MDT_BEGIN(peer_entry_vtable)
+ 	MDT_ENTRY("addrv4", peer_entry_t, addr, MDTV_ADDR,
+ 	    SID_BGP_PEER_ENTRY_ADDR_V4, DABIT_BGP_PEER_ENTRY_ADDR, MDTF_OPTVAL,
+--- //src/gated/svipul.elgin.4/gated-ctk/src/bgp/bgp_init.c	#6
++++ src/gated/gated-ctk/src/bgp/bgp_init.c	2017-01-06 11:16:19.644826906 -0800
+@@ -8283,6 +8283,7 @@
+ 
+ 	// reset the unsupported caps count
+ 	bgpp_flag_reset(bnp, BGPPF_UNSUPPORTED_CAP);
++	bgpp_flag_reset(bnp, BGPPF_LINK_DOWN_IAR);
+ 
+ 	// free resolution requests 
+ 	bgp_peer_resolution_free(bnp);
+@@ -14349,6 +14350,7 @@
+ 	uint v6_nexthops = 0;
+ 
+ 	BGP_PROF("bgp_peer_handle_linkdown");
++	bgpp_flag_set(bnp, BGPPF_LINK_DOWN_IAR);
+ 	if (BGP_IS_CONVERGED()) {
+ 		bgpp_flag_set(bnp, BGPPF_TRACK_PEER);
+ 		BGP_PEER_TRACK_CONVERGENCE_TRACE(bnp, "LINKDOWN:(%s)",
+--- //src/gated/svipul.elgin.4/gated-ctk/src/bgp/bgp_rt.c	#2
++++ src/gated/gated-ctk/src/bgp/bgp_rt.c	2017-01-06 17:29:55.129672124 -0800
+@@ -2626,7 +2626,11 @@
+ 	bool more = false;
+ 
+ 	BGP_PROF("bgp_rt_peer_del_routes_job");
+-
++	if() {
++		BGP_QTRACE2(bnp->bgp_task, TR_ROUTE, "--- bgp_rt_peer_del_routes_job: "
++				 "defer deletion for peer %s", (char *)bnp->bgp_name);
++		return;
++	}
+ 	BGP_QTRACE2(bnp->bgp_task, TR_ROUTE, "bgp_rt_peer_del_routes_job: "
+ 		    "starting for peer %s", (char *)bnp->bgp_name);
+ 
+--- //src/gated/svipul.elgin.4/gated-ctk/src/fwk/FwkQuickTrace.tin	#1
++++ src/gated/gated-ctk/src/fwk/FwkQuickTrace.tin	2016-12-20 16:30:29.683378784 -0800
+@@ -22,7 +22,7 @@
+ Root::handleInitialized() {
+    if ( !gatedImplTrh ) {
+       TRACE0( "Initialize fwk's quicktrace handle" );
+-      QuickTrace::SizeSpec sizeSpec = { 64, 64, 64, 64, 64, 64, 64, 64, 64, 64 };
++      QuickTrace::SizeSpec sizeSpec = { 1024, 1024, 1024, 1024, 1024, 1024, 1024, 64, 64, 64 };
+       const char *qt_prefix = GATED_IMPL_TRACE_PREFIX;
+       char qt_file[MAXHOSTNAMELENGTH + 1];
+ 
+--- //src/gated/svipul.elgin.4/gated-ctk/src/fwk/GatedImpl.tin	#2
++++ src/gated/gated-ctk/src/fwk/GatedImpl.tin	2016-12-20 16:29:51.407729930 -0800
+@@ -4524,7 +4524,7 @@
+    {
+       TRACE0( "Routing reactor is ready for vrf " << vrfName_ );
+       if ( !gatedImplTrh ) {
+-         QuickTrace::SizeSpec sizeSpec = { 64, 64, 64, 64, 64, 64, 64, 64, 64, 64 };
++         QuickTrace::SizeSpec sizeSpec = { 1024, 1024, 1024, 1024, 1024, 1024, 1024, 64, 64, 64 };
+ 	      const char *qt_prefix = GATED_IMPL_TRACE_PREFIX;
+ 	      char qt_file[MAXHOSTNAMELENGTH + 1];
+ 
+--- //src/gated/svipul.elgin.4/gated-ctk/src/mioagt/bgp_api.h	#2
++++ src/gated/gated-ctk/src/mioagt/bgp_api.h	2017-01-05 17:34:16.304650170 -0800
+@@ -1095,6 +1095,7 @@
+ #define SID_BGP_PEER_ENTRY_ESTABLISH_FAIL_HINT		130
+ #define SID_BGP_PEER_ENTRY_PFX_V4_LU_DROP		131
+ #define SID_BGP_PEER_ENTRY_BGP_FLAGS1			132
++#define SID_BGP_PEER_ENTRY_BGP_FLAGS2			133
+ 
+ /* 4-byte-ASN capability negotiation bits*/
+ #define BNP_AS4_NONE		0
